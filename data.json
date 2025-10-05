@@ -1,0 +1,41 @@
+{
+  "tasks": {
+    "1": {
+      "id": 1,
+      "postLink": "https://x.com/0xIdio_/status/1968677503624499279",
+      "maxLikes": 2,
+      "maxRetweets": 2,
+      "maxComments": 2,
+      "claimedLikes": 1,
+      "claimedRetweets": 1,
+      "claimedComments": 0,
+      "completions": []
+    }
+  },
+  "workers": {
+    "1014549742698643596": {
+      "twitter": "@pontifexthede",
+      "points": 0,
+      "activeClaims": [
+        {
+          "taskId": 1,
+          "taskType": "LIKE",
+          "claimedAt": 1759604437306,
+          "status": "pending_submission",
+          "proof": null
+        },
+        {
+          "taskId": 1,
+          "taskType": "RETWEET",
+          "claimedAt": 1759604830604,
+          "status": "pending_submission",
+          "proof": null
+        }
+      ]
+    }
+  },
+  "registeredTwitterHandles": [
+    "pontifexthede"
+  ],
+  "taskIdCounter": 2
+}
