@@ -12,60 +12,18 @@ const {
     ButtonStyle
 } = require('discord.js');
 const { REST } = require('@discordjs/rest');
-const fs = require('fs');
-const path = require('path');
+const Database = require('@replit/database');
 
-// === CONFIG ===
-const TOKEN = 'MTQyMzk3NzMyMjA4MzY0NzUxOQ.GdBoOl.y1oPnQ7mrMHoyT5d3mHiwLtSlG-mIsdFfEO3vE'; // ← REPLACE
-const CLIENT_ID = '1423977322083647519'; // ← REPLACE
-const GUILD_ID = '1312298090916610160'; // ← REPLACE
-const ALERT_CHANNEL_ID = '1312299015445938177'; // ← REPLACE (#task-alerts channel ID)
+// === CONFIG (SET THESE IN REPLIT SECRETS) ===
+const TOKEN = process.env.MTQyMzk3NzMyMjA4MzY0NzUxOQ.GYWaHA.UlO7x5_ksJieSSO0QjVcfLmwY-0kWVUToTHNzA;
+const CLIENT_ID = process.env.1423977322083647519;
+const GUILD_ID = process.env.1312298090916610160;
 
-// === DATA PERSISTENCE ===
-const DATA_FILE = path.join(__dirname, 'data.json');
-
-function loadData() {
-    try {
-        if (!fs.existsSync(DATA_FILE)) {
-            console.log('📥 No data file found — initializing fresh data.');
-            return { tasks: {}, workers: {}, registeredTwitterHandles: [], taskIdCounter: 1 };
-        }
-        const rawData = fs.readFileSync(DATA_FILE, 'utf8');
-        const data = JSON.parse(rawData);
-        const tasks = new Collection(Object.entries(data.tasks || {}));
-        const workers = new Collection(Object.entries(data.workers || {}));
-        const registeredTwitterHandles = new Set(data.registeredTwitterHandles || []);
-        return {
-            tasks,
-            workers,
-            registeredTwitterHandles,
-            taskIdCounter: data.taskIdCounter || 1
-        };
-    } catch (error) {
-        console.error('❌ Error loading data:', error.message);
-        return {
-            tasks: new Collection(),
-            workers: new Collection(),
-            registeredTwitterHandles: new Set(),
-            taskIdCounter: 1
-        };
-    }
-}
-
-function saveData() {
-    try {
-        const data = {
-            tasks: Object.fromEntries(client.tasks),
-            workers: Object.fromEntries(client.workers),
-            registeredTwitterHandles: [...client.registeredTwitterHandles],
-            taskIdCounter
-        };
-        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf8');
-        console.log('💾 Data saved successfully.');
-    } catch (error) {
-        console.error('❌ Error saving data:', error.message);
-    }
-}
+// === CHANNEL IDS (SET IN REPLIT SECRETS OR REPLACE HERE) ===
+const TASK_ANNOUNCE_CHANNEL_ID = process.env.TASK_ANNOUNCE_CHANNEL_ID || '1312298517456486420';
+const TASK_SUBMISSION_CHANNEL_ID = process.env.TASK_SUBMISSION_CHANNEL_ID || '1424472184931487764';
+const APPROVAL_REWARDS_CHANNEL_ID = process.env.APPROVAL_REWARDS_CHANNEL_ID || '1424514444968329296';
+const ALERT_CHANNEL_ID = process.env.ALERT_CHANNEL_ID || '1424549743387738122';
 
 // === STORAGE ===
 const client = new Client({
@@ -78,17 +36,65 @@ const client = new Client({
     partials: [Partials.Channel, Partials.Message, Partials.User]
 });
 
-const savedData = loadData();
-client.tasks = savedData.tasks;
-client.workers = savedData.workers;
-client.registeredTwitterHandles = savedData.registeredTwitterHandles;
-let taskIdCounter = savedData.taskIdCounter;
+const db = new Database();
+client.tasks = new Collection();
+client.workers = new Collection();
+client.registeredTwitterHandles = new Set();
+let taskIdCounter = 1;
+
+// === LOAD DATA FROM REPLIT DB ===
+async function loadData() {
+    try {
+        const rawData = await db.get('botData');
+        if (!rawData) {
+            console.log('📥 No saved data — initializing fresh.');
+            return { tasks: {}, workers: {}, registeredTwitterHandles: [], taskIdCounter: 1 };
+        }
+
+        const data = JSON.parse(rawData);
+        const tasks = new Collection();
+        for (const [id, task] of Object.entries(data.tasks || {})) {
+            tasks.set(id, task);
+        }
+
+        const workers = new Collection();
+        for (const [id, worker] of Object.entries(data.workers || {})) {
+            workers.set(id, worker);
+        }
+
+        const registeredTwitterHandles = new Set(data.registeredTwitterHandles || []);
+
+        console.log(`✅ Loaded: ${tasks.size} tasks, ${workers.size} workers`);
+        return { tasks, workers, registeredTwitterHandles, taskIdCounter: data.taskIdCounter || 1 };
+    } catch (error) {
+        console.error('❌ Error loading from Replit DB:', error.message);
+        return { tasks: new Collection(), workers: new Collection(), registeredTwitterHandles: new Set(), taskIdCounter: 1 };
+    }
+}
+
+// === SAVE DATA TO REPLIT DB ===
+async function saveData() {
+    try {
+        const data = {
+            tasks: Object.fromEntries(client.tasks),
+            workers: Object.fromEntries(client.workers),
+            registeredTwitterHandles: [...client.registeredTwitterHandles],
+            taskIdCounter
+        };
+
+        await db.set('botData', JSON.stringify(data));
+        console.log('💾 Saved to Replit DB successfully.');
+    } catch (error) {
+        console.error('❌ Error saving to Replit DB:', error.message);
+    }
+}
 
 // === SLASH COMMANDS ===
 const commands = [
+    // === ADMIN COMMANDS ===
     new SlashCommandBuilder()
         .setName('task')
-        .setDescription('🔒 ADMIN ONLY: Create a new Twitter engagement task')
+        .setDescription('🔒 Create a new Twitter engagement task')
         .addStringOption(option =>
             option.setName('post_link')
                 .setDescription('Link to the tweet')
@@ -107,6 +113,51 @@ const commands = [
                 .setRequired(true)),
 
     new SlashCommandBuilder()
+        .setName('approve')
+        .setDescription('🔐 Approve a submission')
+        .addUserOption(option =>
+            option.setName('user')
+                .setDescription('User who submitted')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('task_id')
+                .setDescription('Task ID')
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('reject')
+        .setDescription('🔐 Reject a submission')
+        .addUserOption(option =>
+            option.setName('user')
+                .setDescription('User who submitted')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('task_id')
+                .setDescription('Task ID')
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('removepoints')
+        .setDescription('⚖️ Remove X points from a user')
+        .addUserOption(option =>
+            option.setName('user')
+                .setDescription('User to remove points from')
+                .setRequired(true))
+        .addIntegerOption(option =>
+            option.setName('amount')
+                .setDescription('Number of points to remove')
+                .setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('clearpoints')
+        .setDescription('🚨 Clear ALL points (type CONFIRM)')
+        .addStringOption(option =>
+            option.setName('confirm')
+                .setDescription('Type "CONFIRM" to proceed')
+                .setRequired(true)),
+
+    // === USER COMMANDS ===
+    new SlashCommandBuilder()
         .setName('register')
         .setDescription('🔗 Register your unique Twitter/X handle')
         .addStringOption(option =>
@@ -119,52 +170,9 @@ const commands = [
         .setDescription('📊 Check your total points'),
 
     new SlashCommandBuilder()
-        .setName('approve')
-        .setDescription('🔐 ADMIN ONLY: Approve a submission')
-        .addUserOption(option =>
-            option.setName('user')
-                .setDescription('User who submitted')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('task_id')
-                .setDescription('Task ID')
-                .setRequired(true)),
+        .setName('taskstatus')
+        .setDescription('📋 Check current task availability'),
 
-    new SlashCommandBuilder()
-        .setName('reject')
-        .setDescription('🔐 ADMIN ONLY: Reject a submission')
-        .addUserOption(option =>
-            option.setName('user')
-                .setDescription('User who submitted')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('task_id')
-                .setDescription('Task ID')
-                .setRequired(true)),
-
-    // NEW: Remove custom points from one user
-    new SlashCommandBuilder()
-        .setName('removepoints')
-        .setDescription('⚖️ ADMIN ONLY: Remove X points from a user')
-        .addUserOption(option =>
-            option.setName('user')
-                .setDescription('User to remove points from')
-                .setRequired(true))
-        .addIntegerOption(option =>
-            option.setName('amount')
-                .setDescription('Number of points to remove (positive number)')
-                .setRequired(true)),
-
-    // UPDATED: Clear ALL points (with confirm)
-    new SlashCommandBuilder()
-        .setName('clearpoints')
-        .setDescription('🚨 ADMIN ONLY: Clear ALL points (type CONFIRM)')
-        .addStringOption(option =>
-            option.setName('confirm')
-                .setDescription('Type "CONFIRM" to proceed')
-                .setRequired(true)),
-
-    // Let user reset their own points
     new SlashCommandBuilder()
         .setName('resetmypoints')
         .setDescription('🧹 Reset ONLY your own points to zero')
@@ -190,20 +198,33 @@ const BUTTON_LIKE = 'claim_like';
 const BUTTON_RETWEET = 'claim_retweet';
 const BUTTON_COMMENT = 'claim_comment';
 
+// === LOAD DATA ON STARTUP ===
+(async () => {
+    const savedData = await loadData();
+    client.tasks = savedData.tasks;
+    client.workers = savedData.workers;
+    client.registeredTwitterHandles = savedData.registeredTwitterHandles;
+    taskIdCounter = savedData.taskIdCounter;
+})();
+
 // === READY EVENT ===
 setTimeout(() => {
     console.log(`✅ ${client.user?.tag || 'Bot'} is online and ready!`);
 }, 5000);
 
-// === LOG TO ALERT CHANNEL (OPTIONAL HELPER) ===
-async function logAction(message) {
+// === LOG TO CHANNEL HELPER ===
+async function logToChannel(channelId, message, embed = null) {
     try {
-        const alertChannel = await client.channels.fetch(ALERT_CHANNEL_ID).catch(() => null);
-        if (alertChannel) {
-            await alertChannel.send(message);
+        const channel = await client.channels.fetch(channelId).catch(() => null);
+        if (channel) {
+            if (embed) {
+                await channel.send({ embeds: [embed] });
+            } else {
+                await channel.send(message);
+            }
         }
     } catch (e) {
-        console.warn('Could not log to alert channel:', e.message);
+        console.warn(`Could not log to channel ${channelId}:`, e.message);
     }
 }
 
@@ -211,18 +232,25 @@ async function logAction(message) {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isCommand() && !interaction.isButton() && !interaction.isModalSubmit()) return;
 
-    const { commandName, user, member, customId } = interaction;
+    const { commandName, user, member } = interaction;
 
+    // Initialize worker if new
     if (!client.workers.has(user.id)) {
         client.workers.set(user.id, { twitter: null, points: 0, activeClaims: [] });
     }
     const worker = client.workers.get(user.id);
+
+    // Check if user has admin permissions
     const isAdmin = member?.permissions?.has('Administrator');
 
-    // === HANDLE /task ===
-    if (commandName === 'task') {
-        if (!isAdmin) return interaction.reply({ content: "⛔ Only admins can create tasks!", flags: 64 });
+    // === ROLE-BASED COMMAND ACCESS ===
+    const adminOnlyCommands = ['task', 'approve', 'reject', 'removepoints', 'clearpoints'];
+    if (adminOnlyCommands.includes(commandName) && !isAdmin) {
+        return interaction.reply({ content: "⛔ Only admins can use this command.", flags: 64 });
+    }
 
+    // === HANDLE /task (ADMIN ONLY) ===
+    if (commandName === 'task') {
         const postLink = interaction.options.getString('post_link');
         const likes = interaction.options.getInteger('likes');
         const retweets = interaction.options.getInteger('retweets');
@@ -242,27 +270,24 @@ client.on('interactionCreate', async interaction => {
         };
 
         client.tasks.set(taskId, task);
-        saveData();
+        await saveData();
 
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(BUTTON_LIKE).setLabel('✅ Claim Like Task').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId(BUTTON_RETWEET).setLabel('🔁 Claim Retweet Task').setStyle(ButtonStyle.Primary),
-            new ButtonBuilder().setCustomId(BUTTON_COMMENT).setLabel('💬 Claim Comment Task').setStyle(ButtonStyle.Secondary)
-        );
-
-        const embed = new EmbedBuilder()
-            .setColor(0x00FF00)
-            .setTitle(`🚀 NEW TASK ALERT!`)
-            .setDescription(`**Task ID:** \`${taskId}\`\n**Post:** ${postLink}`)
+        // Announce to task channel with @everyone
+        const announceEmbed = new EmbedBuilder()
+            .setColor(0xFFA500)
+            .setTitle(`🚨 NEW TASK DROPPED!`)
+            .setDescription(`**Post:** ${postLink}`)
             .addFields(
-                { name: '🎯 Likes Needed', value: `${likes}`, inline: true },
-                { name: '🔁 Retweets Needed', value: `${retweets}`, inline: true },
-                { name: '💬 Comments Needed', value: `${comments}`, inline: true }
+                { name: '🎯 LIKE Tasks', value: `${likes} slots — 1 point each`, inline: true },
+                { name: '🔁 RETWEET Tasks', value: `${retweets} slots — 2 points each`, inline: true },
+                { name: '💬 COMMENT Tasks', value: `${comments} slots — 3 points each`, inline: true }
             )
-            .setFooter({ text: 'Click a button below to claim!' })
+            .setFooter({ text: 'Claim tasks fast — first come, first served!' })
             .setTimestamp();
 
-        await interaction.reply({ embeds: [embed], components: [row] });
+        await logToChannel(TASK_ANNOUNCE_CHANNEL_ID, '@everyone', announceEmbed);
+
+        await interaction.reply({ content: "✅ Task created and announced!", flags: 64 });
     }
 
     // === HANDLE TASK CLAIM BUTTONS ===
@@ -284,11 +309,11 @@ client.on('interactionCreate', async interaction => {
         }
 
         task[taskKey]++;
-        saveData();
+        await saveData();
 
         const claim = { taskId: task.id, taskType, claimedAt: Date.now(), status: 'pending_submission', proof: null };
         worker.activeClaims.push(claim);
-        saveData();
+        await saveData();
 
         await interaction.reply({ content: `📸 After completing your ${taskType} on Twitter, submit a screenshot below!`, flags: 64 });
 
@@ -316,9 +341,9 @@ client.on('interactionCreate', async interaction => {
             if (activeClaim) {
                 activeClaim.status = 'timed_out';
                 task[taskKey]--;
-                saveData();
+                await saveData();
 
-                await logAction(`⚠️ <@${user.id}> timed out on ${taskType} task (ID: ${task.id}) — slot freed!`);
+                await logToChannel(ALERT_CHANNEL_ID, `⚠️ <@${user.id}> timed out on ${taskType} task (ID: ${task.id}) — slot freed!`);
 
                 try {
                     await user.send(`⏰ You didn’t submit proof for your ${taskType} task in time. Slot has been released.`);
@@ -343,7 +368,11 @@ client.on('interactionCreate', async interaction => {
 
         claim.proof = interaction.fields.getTextInputValue('proof_image');
         claim.status = 'awaiting_approval';
-        saveData();
+        await saveData();
+
+        // Log to submission channel
+        const remaining = task[`max${taskType}s`] - task[`claimed${taskType}s`];
+        await logToChannel(TASK_SUBMISSION_CHANNEL_ID, `✅ New ${taskType} submission received! ${remaining} ${taskType} slots remaining.`);
 
         await interaction.reply({
             content: "✅ Proof received! Awaiting admin approval. You’ll be notified soon.",
@@ -351,10 +380,8 @@ client.on('interactionCreate', async interaction => {
         });
     }
 
-    // === HANDLE /approve ===
+    // === HANDLE /approve (ADMIN ONLY) ===
     else if (commandName === 'approve') {
-        if (!isAdmin) return interaction.reply({ content: "⛔ Admin only.", flags: 64 });
-
         const targetUser = interaction.options.getUser('user');
         const taskId = interaction.options.getInteger('task_id');
         const targetWorker = client.workers.get(targetUser.id);
@@ -374,7 +401,7 @@ client.on('interactionCreate', async interaction => {
         else if (claim.taskType === 'COMMENT') points = 3;
 
         targetWorker.points += points;
-        saveData();
+        await saveData();
 
         const task = client.tasks.get(taskId);
         if (task) {
@@ -386,8 +413,11 @@ client.on('interactionCreate', async interaction => {
                 proof: claim.proof,
                 points
             });
-            saveData();
+            await saveData();
         }
+
+        // Announce in rewards channel
+        await logToChannel(APPROVAL_REWARDS_CHANNEL_ID, `🎉 <@${targetUser.id}> earned **${points} point(s)** for **${claim.taskType}** task!`);
 
         try {
             await targetUser.send(`🎉 Your ${claim.taskType} task (ID: ${taskId}) was approved! +${points} pts → Total: ${targetWorker.points}`);
@@ -396,10 +426,8 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ content: `✅ Approved ${targetUser}'s ${claim.taskType}. +${points} pts awarded.`, flags: 64 });
     }
 
-    // === HANDLE /reject ===
+    // === HANDLE /reject (ADMIN ONLY) ===
     else if (commandName === 'reject') {
-        if (!isAdmin) return interaction.reply({ content: "⛔ Admin only.", flags: 64 });
-
         const targetUser = interaction.options.getUser('user');
         const taskId = interaction.options.getInteger('task_id');
         const targetWorker = client.workers.get(targetUser.id);
@@ -412,7 +440,7 @@ client.on('interactionCreate', async interaction => {
 
         const claim = targetWorker.activeClaims[claimIndex];
         claim.status = 'rejected';
-        saveData();
+        await saveData();
 
         try {
             await targetUser.send(`❌ Your ${claim.taskType} task (ID: ${taskId}) was rejected by admin. No points awarded.`);
@@ -432,7 +460,7 @@ client.on('interactionCreate', async interaction => {
         }
         worker.twitter = `@${twitterHandle}`;
         client.registeredTwitterHandles.add(twitterHandle);
-        saveData();
+        await saveData();
         await interaction.reply({ content: `✅ Registered: ${worker.twitter}`, flags: 64 });
     }
 
@@ -457,10 +485,53 @@ client.on('interactionCreate', async interaction => {
         await interaction.reply({ embeds: [embed], flags: 64 });
     }
 
+    // === HANDLE /taskstatus ===
+    else if (commandName === 'taskstatus') {
+        const task = [...client.tasks.values()].slice(-1)[0];
+        if (!task) {
+            return interaction.reply({ content: "📭 No active task.", flags: 64 });
+        }
+
+        const statusEmbed = new EmbedBuilder()
+            .setColor(0x1E90FF)
+            .setTitle(`📊 CURRENT TASK STATUS`)
+            .setDescription(`**Post:** ${task.postLink}`)
+            .addFields(
+                {
+                    name: '👍 LIKES',
+                    value: `${task.maxLikes - task.claimedLikes} / ${task.maxLikes} slots left`,
+                    inline: true
+                },
+                {
+                    name: '🔁 RETWEETS',
+                    value: `${task.maxRetweets - task.claimedRetweets} / ${task.maxRetweets} slots left`,
+                    inline: true
+                },
+                {
+                    name: '💬 COMMENTS',
+                    value: `${task.maxComments - task.claimedComments} / ${task.maxComments} slots left`,
+                    inline: true
+                }
+            )
+            .setFooter({ text: 'Submit proof after claiming!' })
+            .setTimestamp();
+
+        await interaction.reply({ embeds: [statusEmbed], flags: 64 });
+    }
+
+    // === HANDLE /resetmypoints ===
+    else if (commandName === 'resetmypoints') {
+        const oldPoints = worker.points;
+        worker.points = 0;
+        await saveData();
+        await interaction.reply({
+            content: `🧹 Your points have been reset from **${oldPoints}** to **0**.`,
+            flags: 64
+        });
+    }
+
     // === HANDLE /removepoints (ADMIN ONLY) ===
     else if (commandName === 'removepoints') {
-        if (!isAdmin) return interaction.reply({ content: "⛔ Admin access only.", flags: 64 });
-
         const targetUser = interaction.options.getUser('user');
         const amount = interaction.options.getInteger('amount');
 
@@ -474,29 +545,24 @@ client.on('interactionCreate', async interaction => {
         }
 
         const oldPoints = targetWorker.points;
-        targetWorker.points = Math.max(0, targetWorker.points - amount); // Never go below 0
+        targetWorker.points = Math.max(0, targetWorker.points - amount);
         const removed = oldPoints - targetWorker.points;
 
-        saveData();
+        await saveData();
+        await logToChannel(ALERT_CHANNEL_ID, `⚖️ <@${user.id}> removed **${removed}** points from <@${targetUser.id}> (New total: ${targetWorker.points})`);
 
-        // Log action
-        await logAction(`⚖️ <@${user.id}> removed **${removed}** points from <@${targetUser.id}> (New total: ${targetWorker.points})`);
+        try {
+            await targetUser.send(`⚖️ An admin removed **${removed}** points from your balance.\nNew total: **${targetWorker.points}**`);
+        } catch (e) { /* ignore */ }
 
         await interaction.reply({
             content: `✅ Removed **${removed}** points from <@${targetUser.id}>.\nNew total: **${targetWorker.points}**`,
             flags: 64
         });
-
-        // Notify user
-        try {
-            await targetUser.send(`⚖️ An admin removed **${removed}** points from your balance.\nNew total: **${targetWorker.points}**`);
-        } catch (e) { /* ignore */ }
     }
 
     // === HANDLE /clearpoints (ADMIN ONLY) ===
     else if (commandName === 'clearpoints') {
-        if (!isAdmin) return interaction.reply({ content: "⛔ Admin access only.", flags: 64 });
-
         const confirm = interaction.options.getString('confirm');
         if (confirm !== "CONFIRM") {
             return interaction.reply({ content: "❌ You must type `CONFIRM` exactly to proceed.", flags: 64 });
@@ -507,24 +573,11 @@ client.on('interactionCreate', async interaction => {
             worker.points = 0;
             clearedCount++;
         }
-        saveData();
-
-        await logAction(`🚨 **ALL POINTS CLEARED** by <@${user.id}> at ${new Date().toLocaleString()}`);
+        await saveData();
+        await logToChannel(ALERT_CHANNEL_ID, `🚨 **ALL POINTS CLEARED** by <@${user.id}> at ${new Date().toLocaleString()}`);
 
         await interaction.reply({
             content: `✅ **EMERGENCY RESET** — Cleared points for ${clearedCount} workers.`,
-            flags: 64
-        });
-    }
-
-    // === HANDLE /resetmypoints ===
-    else if (commandName === 'resetmypoints') {
-        const oldPoints = worker.points;
-        worker.points = 0;
-        saveData();
-
-        await interaction.reply({
-            content: `🧹 Your points have been reset from **${oldPoints}** to **0**.`,
             flags: 64
         });
     }
